@@ -1,0 +1,77 @@
+workflow:
+   rules:
+     - if: $CI_COMMIT_BRANCH != "main" && $CI_PIPELINE_SOURCE != "merge_request_event"
+       when: never
+     - when: always
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  IMAGE_NAME: $CI_REGISTRY_IMAGE/microservice
+  DEV_ENV: http://192.168.0.100:3000
+test_process:
+  stage: test 
+  image: node:17-alpine3.14
+  tags:
+    - docker
+  before_script:
+    - cd app
+    - npm install
+  script:
+    - npm test
+
+build_image:
+  stage: build
+  only:
+    - main
+  tags:
+    - shell
+  before_script:
+    - export PACKAGE_VERSION=$(cat app/package.json | jq -r .version)
+    - export TAG_VERSION=$PACKAGE_VERSION.$CI_PIPELINE_IID
+    - echo "TAG_VERSION=$TAG_VERSION" >> file.env
+  script:
+    - docker build . -t $IMAGE_NAME:$TAG_VERSION
+  artifacts:
+    reports:
+      dotenv: file.env
+  
+ 
+
+push_gitlab_registry:
+  stage: build
+  only:
+    - main 
+  tags:
+    - shell
+  needs:
+    - build_image
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker push $IMAGE_NAME:$TAG_VERSION  
+
+deploy_process:
+  stage: deploy 
+  only:
+    - main 
+  tags:
+    - shell
+  before_script:
+    - echo "$SSH_PRIVATE_KEY" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - scp -o StrictHostKeyChecking=no ./docker-compose.yml aslan@serverlinux:/home/aslan
+  script:
+    - ssh -o StrictHostKeyChecking=no aslan@serverlinux "
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        export DOCKER_IMAGE_NAME=$IMAGE_NAME &&
+        export DOCKER_IMAGE_TAG=$TAG_VERSION &&
+        docker-compose down &&
+        docker-compose up -d"
+        
+  environment:
+    name: dev_env
+    url: $DEV_ENV
